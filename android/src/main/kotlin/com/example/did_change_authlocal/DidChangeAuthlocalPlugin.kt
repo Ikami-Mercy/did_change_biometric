@@ -1,6 +1,9 @@
 package com.example.did_change_authlocal
 
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 
@@ -19,6 +22,7 @@ import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import java.util.concurrent.Executors
 
 /** DidChangeAuthlocalPlugin */
 class DidChangeAuthlocalPlugin : FlutterPlugin, MethodCallHandler {
@@ -30,6 +34,10 @@ class DidChangeAuthlocalPlugin : FlutterPlugin, MethodCallHandler {
     private var keyStore: KeyStore? = null
     private val KEY_NAME = "did_change_authlocal"
     private var biometricPrompt: BiometricPrompt? = null
+
+    // Keystore binder calls can block for seconds on low-end devices; keep them off the main thread.
+    private val keystoreExecutor = Executors.newSingleThreadExecutor()
+    private val mainThreadHandler = Handler(Looper.getMainLooper())
 
 
     override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
@@ -46,7 +54,16 @@ class DidChangeAuthlocalPlugin : FlutterPlugin, MethodCallHandler {
         @NonNull result: Result
     ) {
         if (call.method == "check") {
-            settingFingerPrint(result)
+            val mainThreadResult = MainThreadResult(result, mainThreadHandler)
+            keystoreExecutor.execute {
+                try {
+                    settingFingerPrint(mainThreadResult)
+                } catch (e: Exception) {
+                    // Same reply Flutter sends for an exception thrown on the platform thread.
+                    Log.e("DidChangeAuthlocal", "check failed", e)
+                    mainThreadResult.error("error", e.message, null)
+                }
+            }
         } else {
             result.notImplemented()
         }
@@ -172,5 +189,25 @@ class DidChangeAuthlocalPlugin : FlutterPlugin, MethodCallHandler {
         )
         keyGenerator.init(keyGenParameterSpec)
         keyGenerator.generateKey()
+    }
+}
+
+private class MainThreadResult(
+    private val result: Result,
+    private val handler: Handler
+) : Result {
+    private var replied = false
+
+    override fun success(value: Any?) = reply { result.success(value) }
+
+    override fun error(code: String, message: String?, details: Any?) =
+        reply { result.error(code, message, details) }
+
+    override fun notImplemented() = reply { result.notImplemented() }
+
+    private fun reply(send: () -> Unit) {
+        if (replied) return
+        replied = true
+        handler.post(send)
     }
 }
